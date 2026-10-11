@@ -13,8 +13,7 @@ import { resolve } from "node:path";
 import { exit } from "node:process";
 import { projectTree, scanProject, type ProjectInfo } from "./scan";
 import { deployToVercel, followVercelDeployment } from "./vercel";
-
-type Provider = "vercel" | "netlify";
+import { recommendProviders, type DeploymentProvider } from "./gemini";
 
 function treeRow(label: string, value: string): string {
   return `  ${pc.dim(label.padEnd(12))}${value}`;
@@ -72,12 +71,39 @@ async function velocity(): Promise<void> {
   note(projectTree(info), "Project structure");
   console.log("");
 
-  const provider = await select<Provider>({
+  const recommendationSpinner = spinner();
+  recommendationSpinner.start("Comparing deployment providers…");
+  const comparison = await recommendProviders(info);
+  recommendationSpinner.stop(
+    comparison.source === "Gemini"
+      ? "Provider comparison complete"
+      : "Using built-in provider comparison",
+  );
+  if (comparison.fallbackReason) log.warn(comparison.fallbackReason);
+
+  console.log(`\n${pc.bold("Provider recommendations")} (${comparison.source})`);
+  for (const recommendation of comparison.recommendations) {
+    const providerName = recommendation.provider === "vercel" ? "Vercel" : "Netlify";
+    console.log(
+      `${recommendation.rank}. ${pc.bold(providerName)}${recommendation.rank === 1 ? pc.green(" — recommended") : ""}: ${recommendation.reason}`,
+    );
+  }
+  console.log("");
+  console.log(pc.bold("Security suggestions"));
+  comparison.securitySuggestions.forEach((suggestion, index) => {
+    console.log(`${index + 1}. ${suggestion}`);
+  });
+  if (comparison.source === "built-in") {
+    console.log(pc.dim("General guidance only; Gemini was unavailable."));
+  }
+  console.log("");
+
+  const provider = await select<DeploymentProvider>({
     message: "Deploy to?",
-    options: [
-      { value: "vercel", label: "Vercel" },
-      { value: "netlify", label: "Netlify (not implemented)" },
-    ],
+    options: comparison.recommendations.map(({ provider, rank }) => ({
+      value: provider,
+      label: `${provider === "vercel" ? "Vercel" : "Netlify"}${rank === 1 ? " (recommended)" : ""}${provider === "netlify" ? " (not implemented)" : ""}`,
+    })),
   });
 
   if (isCancel(provider)) {
