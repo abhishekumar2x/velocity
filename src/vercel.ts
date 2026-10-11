@@ -57,7 +57,7 @@ export async function deployToVercel(
     requestBody: {
       name: deploymentName,
       files,
-      target: "preview",
+      target: "staging",
       projectSettings: {
         framework: Object.values(VercelFramework).find(
           (framework) => framework === project.framework?.slug,

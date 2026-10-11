@@ -38,3 +38,10 @@ limited estimates because source files and provider settings were not reviewed.
 Provider recommendations compare each provider's build and output settings
 with the detected project configuration. Netlify deployment is not implemented
 yet, and is identified as such in the selector.
+
+After Vercel finishes streaming deployment logs, Velocity checks for build or
+deployment errors and can ask Gemini for project-specific fix suggestions.
+Only bounded error context is sent, with common secrets and tokens redacted.
+Set `GEMINI_API_KEY` to enable this analysis. Short Gemini rate limits are
+retried once when the API supplies a retry delay; persistent HTTP 429 responses
+are reported with quota and billing checks to try.

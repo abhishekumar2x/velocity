@@ -13,7 +13,11 @@ import { resolve } from "node:path";
 import { exit } from "node:process";
 import { projectTree, scanProject, type ProjectInfo } from "./scan";
 import { deployToVercel, followVercelDeployment } from "./vercel";
-import { recommendProviders, type DeploymentProvider } from "./gemini";
+import {
+  recommendProviders,
+  suggestDeploymentFixes,
+  type DeploymentProvider,
+} from "./gemini";
 
 function treeRow(label: string, value: string): string {
   return `  ${pc.dim(label.padEnd(12))}${value}`;
@@ -152,9 +156,18 @@ async function velocity(): Promise<void> {
   deployment.stop(`Vercel deployment created (${result.readyState})`);
 
   log.info("Streaming Vercel build logs…");
+  const deploymentLogs: string[] = [];
+  let capturedLogCharacters = 0;
   let buildResult: Awaited<ReturnType<typeof followVercelDeployment>>;
   try {
-    buildResult = await followVercelDeployment(result.id, (line) => console.log(line));
+    buildResult = await followVercelDeployment(result.id, (line) => {
+      console.log(line);
+      if (deploymentLogs.length < 2_000 && capturedLogCharacters < 500_000) {
+        const capturedLine = line.slice(0, 5_000);
+        deploymentLogs.push(capturedLine);
+        capturedLogCharacters += capturedLine.length;
+      }
+    });
   } catch (error) {
     log.error(error instanceof Error ? error.message : String(error));
     outro(pc.red("Deployment was created, but its build logs could not be retrieved."));
@@ -169,6 +182,30 @@ async function velocity(): Promise<void> {
     ].join("\n"),
     "Deployment",
   );
+
+  const diagnosisSpinner = spinner();
+  diagnosisSpinner.start("Checking completed logs for errors…");
+  try {
+    const suggestions = await suggestDeploymentFixes(
+      info,
+      deploymentLogs,
+      buildResult.readyState,
+    );
+    if (suggestions) {
+      diagnosisSpinner.stop("Deployment error analysis complete");
+      note(
+        suggestions.map((suggestion, index) => `${index + 1}. ${suggestion}`).join("\n"),
+        "Gemini fix suggestions",
+      );
+    } else {
+      diagnosisSpinner.stop("No deployment errors found in logs");
+    }
+  } catch (error) {
+    diagnosisSpinner.stop("Could not analyze deployment errors");
+    log.warn(
+      `Gemini fix suggestions are unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   if (buildResult.readyState !== "READY") {
     outro(pc.red(`Vercel deployment ended with status ${buildResult.readyState}.`));
