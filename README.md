@@ -26,5 +26,15 @@ and configuration files. Set `GEMINI_API_KEY` to use Gemini for these reviews.
 Environment files and dependency lockfiles are excluded, and common credential
 assignments are redacted before source snippets are sent. If the key is
 unavailable or the API request fails, Velocity uses a built-in provider
-comparison and general security guidance. Netlify deployment is not
-implemented yet, and is identified as such in the recommendation and selector.
+comparison and framework-aware security guidance. Security suggestions include
+up to five actionable bullet points. Each provider gets its own security score
+and explanation, displayed on a colored 10-step scale. The best deployment fit
+is ranked separately using framework and build compatibility, so the
+recommendation remains clear when security scores tie. For a tie, the
+higher-ranked project fit receives a transparent one-point edge; its note
+clarifies that this is a fit adjustment, not additional security evidence.
+Built-in scores start at 6/10 and are reduced for scanner warnings; they are
+limited estimates because source files and provider settings were not reviewed.
+Provider recommendations compare each provider's build and output settings
+with the detected project configuration. Netlify deployment is not implemented
+yet, and is identified as such in the selector.

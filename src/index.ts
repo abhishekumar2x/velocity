@@ -19,6 +19,15 @@ function treeRow(label: string, value: string): string {
   return `  ${pc.dim(label.padEnd(12))}${value}`;
 }
 
+function securityScale(score: number): string {
+  const filled = "█".repeat(score);
+  const empty = "░".repeat(10 - score);
+
+  if (score >= 8) return `${pc.green(filled)}${pc.dim(empty)}`;
+  if (score >= 5) return `${pc.yellow(filled)}${pc.dim(empty)}`;
+  return `${pc.red(filled)}${pc.dim(empty)}`;
+}
+
 function printScan(info: ProjectInfo): void {
   const framework = info.framework
     ? `${pc.cyan(info.framework.name)}${info.framework.name.toLowerCase().includes("sveltekit") ? pc.dim(" (SSR)") : ""}`
@@ -79,22 +88,28 @@ async function velocity(): Promise<void> {
       ? "Provider comparison complete"
       : "Using built-in provider comparison",
   );
-  if (comparison.fallbackReason) log.warn(comparison.fallbackReason);
 
   console.log(`\n${pc.bold("Provider recommendations")} (${comparison.source})`);
   for (const recommendation of comparison.recommendations) {
     const providerName = recommendation.provider === "vercel" ? "Vercel" : "Netlify";
     console.log(
-      `${recommendation.rank}. ${pc.bold(providerName)}${recommendation.rank === 1 ? pc.green(" — recommended") : ""}: ${recommendation.reason}`,
+      `${recommendation.rank}. ${pc.bold(providerName)}${recommendation.rank === 1 ? pc.green(" — BEST FIT") : ""}: ${recommendation.reason}`,
     );
+    console.log(
+      `   Security: ${securityScale(recommendation.securityScore)} ${pc.bold(`${recommendation.securityScore}/10`)}`,
+    );
+    console.log(`   ${pc.dim(recommendation.securityNote)}`);
   }
+  console.log(pc.dim("Best fit is ranked by project/framework compatibility; security scores are separate."));
   console.log("");
   console.log(pc.bold("Security suggestions"));
-  comparison.securitySuggestions.forEach((suggestion, index) => {
-    console.log(`${index + 1}. ${suggestion}`);
+  comparison.securitySuggestions.forEach((suggestion) => {
+    console.log(`• ${suggestion}`);
   });
   if (comparison.source === "built-in") {
-    console.log(pc.dim("General guidance only; Gemini was unavailable."));
+    console.log(
+      pc.dim("Built-in scores start at 6/10 and are reduced for scanner warnings; source files and provider settings were not reviewed."),
+    );
   }
   console.log("");
 
@@ -102,7 +117,7 @@ async function velocity(): Promise<void> {
     message: "Deploy to?",
     options: comparison.recommendations.map(({ provider, rank }) => ({
       value: provider,
-      label: `${provider === "vercel" ? "Vercel" : "Netlify"}${rank === 1 ? " (recommended)" : ""}${provider === "netlify" ? " (not implemented)" : ""}`,
+      label: `${provider === "vercel" ? "Vercel" : "Netlify"}${rank === 1 ? " (best fit)" : ""}${provider === "netlify" ? " (not implemented)" : ""}`,
     })),
   });
 

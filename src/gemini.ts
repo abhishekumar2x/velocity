@@ -8,13 +8,14 @@ export interface ProviderRecommendation {
   provider: DeploymentProvider;
   rank: number;
   reason: string;
+  securityScore: number;
+  securityNote: string;
 }
 
 export interface ProviderComparison {
   recommendations: ProviderRecommendation[];
   securitySuggestions: string[];
   source: "Gemini" | "built-in";
-  fallbackReason?: string;
 }
 
 const MODELS = ["gemini-3.8-flash", "gemini-3.5-flash"] as const;
@@ -52,31 +53,93 @@ async function collectSecurityContext(project: ProjectInfo): Promise<string> {
   return sections.join("\n\n");
 }
 
-function fallbackComparison(project: ProjectInfo, reason?: string): ProviderComparison {
-  const frameworkReason = project.framework
-    ? `Detected ${project.framework.name}; Vercel can use the scanned framework settings.`
-    : "Vercel deployment is integrated; framework was not detected, so verify compatibility.";
-
+function fallbackComparison(project: ProjectInfo): ProviderComparison {
+  const score = fallbackSecurityScore(project);
+  const recommendations: ProviderRecommendation[] = [
+    {
+      provider: "vercel",
+      rank: 1,
+      reason: fallbackProviderReason("Vercel", project),
+      securityScore: score,
+      securityNote: "Limited estimate from project scanner warnings; hosting security settings were not reviewed.",
+    },
+    {
+      provider: "netlify",
+      rank: 2,
+      reason: fallbackProviderReason("Netlify", project),
+      securityScore: score,
+      securityNote: "Limited estimate from project scanner warnings; hosting security settings were not reviewed.",
+    },
+  ];
   return {
     source: "built-in",
-    ...(reason ? { fallbackReason: reason } : {}),
     securitySuggestions: fallbackSecuritySuggestions(project),
-    recommendations: [
-      { provider: "vercel", rank: 1, reason: frameworkReason },
-      {
-        provider: "netlify",
-        rank: 2,
-        reason: "Netlify support is not implemented in Velocity yet, so deployment cannot proceed there.",
-      },
-    ],
+    recommendations: separateTiedScores(recommendations),
   };
 }
 
+function separateTiedScores(recommendations: ProviderRecommendation[]): ProviderRecommendation[] {
+  if (recommendations.length < 2) return recommendations;
+  const [first, second] = recommendations;
+  if (!first || !second || first.securityScore !== second.securityScore) return recommendations;
+
+  first.securityScore = Math.min(10, first.securityScore + 1);
+  second.securityScore = Math.max(0, second.securityScore - 1);
+  first.securityNote = `${first.securityNote} One-point edge reflects its higher project-fit rank, not additional security evidence.`;
+  second.securityNote = `${second.securityNote} One-point adjustment reflects its lower project-fit rank, not additional security evidence.`;
+  return recommendations;
+}
+
+function fallbackSecurityScore(project: ProjectInfo): number {
+  const warningPenalty = project.warnings.reduce((total, warning) => {
+    if (/exposed to the browser/i.test(warning)) return total + 4;
+    if (/\.env files found but not listed in \.gitignore/i.test(warning)) return total + 2;
+    return total + 1;
+  }, 0);
+  return Math.max(1, 6 - warningPenalty);
+}
+
+function fallbackProviderReason(provider: string, project: ProjectInfo): string {
+  const framework = project.framework?.name ?? "detected";
+  const build = project.buildCommand ?? "build command";
+  const output = project.outputDir ?? "output directory";
+  return `${framework} project: check ${provider}'s build (${build}) and output (${output}) settings.`;
+}
+
 function fallbackSecuritySuggestions(project: ProjectInfo): string[] {
-  if (project.warnings.length > 0) {
-    return project.warnings.slice(0, 3).map((warning) => warning.endsWith(".") ? warning : `${warning}.`);
+  const suggestions = project.warnings.map((warning) =>
+    warning.endsWith(".") ? warning : `${warning}.`,
+  );
+  const framework = project.framework?.name.toLowerCase() ?? "";
+
+  if (framework.includes("sveltekit")) {
+    suggestions.push(
+      "For SvelteKit, review server hooks and +server.ts handlers for per-request authorization and secure cookie settings.",
+    );
+  } else if (framework.includes("next")) {
+    suggestions.push(
+      "For Next.js, review Route Handlers and Server Actions for per-request authorization; keep secrets server-side.",
+    );
+  } else if (framework.includes("nuxt")) {
+    suggestions.push(
+      "For Nuxt, review server API routes for authorization and keep private runtime config out of client code.",
+    );
+  } else if (framework.includes("vite")) {
+    suggestions.push(
+      "For this Vite project, keep secrets out of VITE_* variables because they are exposed in browser bundles.",
+    );
+  } else {
+    suggestions.push(
+      `For this ${project.framework?.name ?? "project"}, review server-side authorization and secret handling before deployment.`,
+    );
   }
-  return ["Keep secrets out of source control and review access checks on sensitive routes."];
+
+  suggestions.push(
+    "Before deploying, set production secrets in each provider's environment settings and confirm local values are not committed.",
+    `For the ${project.framework?.name ?? "detected"} production build, verify security headers such as Content-Security-Policy and Strict-Transport-Security are configured.`,
+  );
+
+  return [...new Set(suggestions)].slice(0, 5);
 }
 
 function parseRecommendations(value: unknown): ProviderRecommendation[] | null {
@@ -92,6 +155,8 @@ function parseRecommendations(value: unknown): ProviderRecommendation[] | null {
       !("provider" in item) ||
       !("reason" in item) ||
       !("rank" in item) ||
+      !("securityScore" in item) ||
+      !("securityNote" in item) ||
       (item.provider !== "vercel" && item.provider !== "netlify") ||
       typeof item.reason !== "string" ||
       item.reason.trim().length < 12 ||
@@ -99,7 +164,14 @@ function parseRecommendations(value: unknown): ProviderRecommendation[] | null {
       typeof item.rank !== "number" ||
       !Number.isInteger(item.rank) ||
       item.rank < 1 ||
-      item.rank > PROVIDERS.length
+      item.rank > PROVIDERS.length ||
+      typeof item.securityScore !== "number" ||
+      !Number.isInteger(item.securityScore) ||
+      item.securityScore < 0 ||
+      item.securityScore > 10 ||
+      typeof item.securityNote !== "string" ||
+      item.securityNote.trim().length < 15 ||
+      item.securityNote.trim().length > 180
     ) {
       return null;
     }
@@ -108,6 +180,8 @@ function parseRecommendations(value: unknown): ProviderRecommendation[] | null {
       provider: item.provider,
       rank: item.rank,
       reason: item.reason.trim(),
+      securityScore: item.securityScore,
+      securityNote: item.securityNote.trim(),
     });
   }
 
@@ -134,8 +208,8 @@ function parseSecuritySuggestions(value: unknown): string[] | null {
   const suggestions = value.securitySuggestions
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim().replace(/\s+/g, " "))
-    .filter((item) => item.length >= 15 && item.length <= 130 && /[.!?]$/.test(item))
-    .slice(0, 3);
+    .filter((item) => item.length >= 20 && item.length <= 220 && /[.!?]$/.test(item))
+    .slice(0, 5);
 
   return suggestions.length > 0 ? suggestions : null;
 }
@@ -162,12 +236,16 @@ async function requestComparison(
                 text: [
                   "Rank Vercel and Netlify for deploying this project.",
                   "Return exactly one recommendation for each provider, ranked 1 and 2, with one factual reason under 20 words.",
-                  "Consider detected framework, package manager, build command, output directory, and actual Velocity support.",
-                  "Vercel deployment is implemented. Netlify deployment is not implemented in Velocity.",
-                  "Do not claim a provider is deployable through Velocity if it is not.",
-                  "Also review the supplied source/config snippets and return up to 3 specific, actionable security suggestions.",
+                  "Compare each provider's framework compatibility, build command, and output directory with the detected project settings.",
+                  "Choose rank 1 as the best deployment fit from framework compatibility and build configuration, independently of security scores; still identify a best fit when security scores are equal.",
+                  "Give provider-specific deployment suggestions without referring to Velocity or its implementation.",
+                  "Also review the supplied source/config snippets and return up to 5 specific security suggestions.",
+                  "Each suggestion should explain the relevant risk and a concrete next step, using project/framework details where supported.",
                   "Security suggestions must be supported by the snippets. Do not claim checks were run or repeat credentials.",
-                  "If no security issue is visible, return one practical security best practice.",
+                  "If no specific issue is visible, give practical checks tailored to this framework and deployment.",
+                  "For each provider recommendation, include a securityScore from 0 to 10 and a short securityNote explaining the score with evidence.",
+                  "Assess provider-specific deployment security only where project evidence supports a difference. If the scores are tied, Velocity will apply a transparent one-point edge to the higher-ranked project fit; do not invent security differences.",
+                  "Do not give perfect scores when important files or hosting settings were not reviewed. A score is a limited estimate, not a full audit.",
                   `Project name: ${project.name}`,
                   `Detected framework: ${project.framework?.name ?? "unknown"}`,
                   `Package manager: ${project.packageManager}`,
@@ -183,7 +261,7 @@ async function requestComparison(
         ],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 350,
+          maxOutputTokens: 700,
           responseMimeType: "application/json",
           responseSchema: {
             type: "OBJECT",
@@ -196,8 +274,10 @@ async function requestComparison(
                     provider: { type: "STRING", enum: PROVIDERS },
                     rank: { type: "INTEGER" },
                     reason: { type: "STRING" },
+                    securityScore: { type: "INTEGER" },
+                    securityNote: { type: "STRING" },
                   },
-                  required: ["provider", "rank", "reason"],
+                  required: ["provider", "rank", "reason", "securityScore", "securityNote"],
                 },
               },
               securitySuggestions: {
@@ -255,7 +335,7 @@ async function requestComparison(
     const recommendations = parseRecommendations(value);
     const securitySuggestions = parseSecuritySuggestions(value);
     if (recommendations && securitySuggestions) {
-      return { recommendations, securitySuggestions };
+      return { recommendations: separateTiedScores(recommendations), securitySuggestions };
     }
   }
 
@@ -265,10 +345,7 @@ async function requestComparison(
 export async function recommendProviders(project: ProjectInfo): Promise<ProviderComparison> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return fallbackComparison(
-      project,
-      "GEMINI_API_KEY is not set; using the built-in provider comparison.",
-    );
+    return fallbackComparison(project);
   }
 
   let lastError = "Gemini could not produce a valid provider ranking.";
@@ -279,10 +356,14 @@ export async function recommendProviders(project: ProjectInfo): Promise<Provider
         return { ...recommendations, source: "Gemini" };
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
+        const retryable =
+          error instanceof TypeError ||
+          [...RETRYABLE_STATUSES].some((status) => lastError.includes(`HTTP ${status}.`));
+        if (!retryable) break;
         if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 800));
       }
     }
   }
 
-  return fallbackComparison(project, `${lastError} Using the built-in provider comparison.`);
+  return fallbackComparison(project);
 }
