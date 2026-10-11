@@ -18,6 +18,11 @@ export interface ProviderComparison {
   source: "Gemini" | "built-in";
 }
 
+export interface DeploymentFixSuggestions {
+  suggestions: string[];
+  source: "Gemini" | "built-in";
+}
+
 const MODELS = ["gemini-3.8-flash", "gemini-3.5-flash"] as const;
 const PROVIDERS: DeploymentProvider[] = ["vercel", "netlify"];
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
@@ -520,18 +525,25 @@ export async function suggestDeploymentFixes(
   project: ProjectInfo,
   logs: string[],
   readyState: string,
-): Promise<string[] | null> {
+): Promise<DeploymentFixSuggestions | null> {
   const logContext = collectBuildErrorContext(logs, readyState);
   if (!logContext) return null;
 
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not set.");
+  const localSuggestions = fallbackDeploymentFixSuggestions(project, logContext);
+  if (!apiKey) {
+    if (localSuggestions) return { suggestions: localSuggestions, source: "built-in" };
+    throw new Error("GEMINI_API_KEY is not set.");
+  }
 
   let lastError: unknown;
   for (const model of MODELS) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await requestBuildFixes(model, apiKey, project, readyState, logContext);
+        return {
+          suggestions: await requestBuildFixes(model, apiKey, project, readyState, logContext),
+          source: "Gemini",
+        };
       } catch (error) {
         lastError = error;
         if (
@@ -547,6 +559,7 @@ export async function suggestDeploymentFixes(
     }
   }
 
+  if (localSuggestions) return { suggestions: localSuggestions, source: "built-in" };
   if (lastError instanceof GeminiRateLimitError) {
     throw new Error(
       "Gemini rate limit or quota exceeded (HTTP 429). Wait and retry, or check the Gemini API quota and billing for the configured key.",
@@ -555,6 +568,33 @@ export async function suggestDeploymentFixes(
   throw new Error(
     `Gemini could not analyze deployment errors: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
   );
+}
+
+function fallbackDeploymentFixSuggestions(
+  project: ProjectInfo,
+  logContext: string,
+): string[] | null {
+  if (
+    !/['"`]?npm['"`]?.{0,80}(?:is not recognized|not found|command not found)|(?:is not recognized|command not found).{0,80}['"`]?npm['"`]?/i.test(
+      logContext,
+    )
+  ) {
+    return null;
+  }
+
+  const nextFramework = project.framework?.name.toLowerCase().includes("next") ?? false;
+  if (!nextFramework) {
+    return [
+      "Netlify tried to run npm, but npm is unavailable in this local environment. Install Node.js LTS, which includes npm, ensure it is on PATH, reopen the terminal, and verify `npm --version`.",
+      "If this project intentionally uses Bun only, install the specific Netlify build plugin shown in the logs as a project dependency with `bun add -d <plugin-package>` so Netlify does not auto-install it with npm.",
+    ];
+  }
+
+  return [
+    "Netlify auto-installs its Next.js adapter (`@netlify/plugin-nextjs`) with npm; that plugin installation failed because npm is not available on PATH.",
+    "Install Node.js LTS (npm is included), ensure `npm --version` works in a new terminal, then rerun the Netlify deployment. You can keep Bun as the project's package manager.",
+    "For a Bun-only setup, add the adapter to the project's dev dependencies with `bun add -d @netlify/plugin-nextjs`; Netlify can then use the declared plugin instead of auto-installing it with npm.",
+  ];
 }
 
 export async function recommendProviders(project: ProjectInfo): Promise<ProviderComparison> {

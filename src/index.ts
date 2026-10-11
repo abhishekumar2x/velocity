@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import { exit } from "node:process";
 import { projectTree, scanProject, type ProjectInfo } from "./scan";
 import { deployToVercel, followVercelDeployment } from "./vercel";
+import { deployToNetlify } from "./netlify";
 import {
   recommendProviders,
   suggestDeploymentFixes,
@@ -121,7 +122,7 @@ async function velocity(): Promise<void> {
     message: "Deploy to?",
     options: comparison.recommendations.map(({ provider, rank }) => ({
       value: provider,
-      label: `${provider === "vercel" ? "Vercel" : "Netlify"}${rank === 1 ? " (best fit)" : ""}${provider === "netlify" ? " (not implemented)" : ""}`,
+      label: `${provider === "vercel" ? "Vercel" : "Netlify"}${rank === 1 ? " (best fit)" : ""}`,
     })),
   });
 
@@ -136,48 +137,63 @@ async function velocity(): Promise<void> {
     exit(0);
   }
 
-  if (provider === "netlify") {
-    outro(pc.yellow("Netlify deployment is not implemented yet."));
-    return;
-  }
-
   const deployment = spinner();
-  deployment.start("Uploading files and creating a Vercel preview deployment…");
-  let result: Awaited<ReturnType<typeof deployToVercel>>;
-  try {
-    result = await deployToVercel(info);
-  } catch (error) {
-    deployment.stop("Vercel deployment failed");
-    log.error(error instanceof Error ? error.message : String(error));
-    outro(pc.red("Could not create the Vercel deployment."));
-    exit(1);
-  }
-
-  deployment.stop(`Vercel deployment created (${result.readyState})`);
-
-  log.info("Streaming Vercel build logs…");
   const deploymentLogs: string[] = [];
   let capturedLogCharacters = 0;
-  let buildResult: Awaited<ReturnType<typeof followVercelDeployment>>;
-  try {
-    buildResult = await followVercelDeployment(result.id, (line) => {
-      console.log(line);
-      if (deploymentLogs.length < 2_000 && capturedLogCharacters < 500_000) {
-        const capturedLine = line.slice(0, 5_000);
-        deploymentLogs.push(capturedLine);
-        capturedLogCharacters += capturedLine.length;
-      }
-    });
-  } catch (error) {
-    log.error(error instanceof Error ? error.message : String(error));
-    outro(pc.red("Deployment was created, but its build logs could not be retrieved."));
-    exit(1);
+  const captureDeploymentLog = (line: string): void => {
+    console.log(line);
+    if (deploymentLogs.length < 2_000 && capturedLogCharacters < 500_000) {
+      const capturedLine = line.slice(0, 5_000);
+      deploymentLogs.push(capturedLine);
+      capturedLogCharacters += capturedLine.length;
+    }
+  };
+  let deploymentUrl: string | null = null;
+  let deploymentId: string | null = null;
+  let buildResult: { readyState: string; logCount: number };
+
+  if (provider === "netlify") {
+    deployment.start("Building and deploying to Netlify…");
+    try {
+      buildResult = await deployToNetlify(info, captureDeploymentLog);
+      deploymentUrl = buildResult.url;
+    } catch (error) {
+      deployment.stop("Netlify deployment failed");
+      log.error(error instanceof Error ? error.message : String(error));
+      outro(pc.red("Could not deploy this project to Netlify."));
+      exit(1);
+    }
+    deployment.stop(`Netlify deployment ${buildResult.readyState.toLowerCase()}`);
+  } else {
+    deployment.start("Uploading files and creating a Vercel preview deployment…");
+    let result: Awaited<ReturnType<typeof deployToVercel>>;
+    try {
+      result = await deployToVercel(info);
+    } catch (error) {
+      deployment.stop("Vercel deployment failed");
+      log.error(error instanceof Error ? error.message : String(error));
+      outro(pc.red("Could not create the Vercel deployment."));
+      exit(1);
+    }
+
+    deploymentId = result.id;
+    deploymentUrl = result.url;
+    deployment.stop(`Vercel deployment created (${result.readyState})`);
+
+    log.info("Streaming Vercel build logs…");
+    try {
+      buildResult = await followVercelDeployment(result.id, captureDeploymentLog);
+    } catch (error) {
+      log.error(error instanceof Error ? error.message : String(error));
+      outro(pc.red("Deployment was created, but its build logs could not be retrieved."));
+      exit(1);
+    }
   }
 
-  log.info(`Deployment finished (${buildResult.readyState}); received ${buildResult.logCount} log lines.`);
+  log.info(`${provider === "vercel" ? "Vercel" : "Netlify"} deployment finished (${buildResult.readyState}); received ${buildResult.logCount} log lines.`);
   note(
     [
-      result.url ? pc.cyan(result.url) : `Deployment ID: ${result.id}`,
+      deploymentUrl ? pc.cyan(deploymentUrl) : deploymentId ? `Deployment ID: ${deploymentId}` : "Deployment URL was not reported by Netlify CLI.",
       `Status: ${buildResult.readyState}`,
     ].join("\n"),
     "Deployment",
@@ -186,16 +202,16 @@ async function velocity(): Promise<void> {
   const diagnosisSpinner = spinner();
   diagnosisSpinner.start("Checking completed logs for errors…");
   try {
-    const suggestions = await suggestDeploymentFixes(
+    const diagnosis = await suggestDeploymentFixes(
       info,
       deploymentLogs,
       buildResult.readyState,
     );
-    if (suggestions) {
+    if (diagnosis) {
       diagnosisSpinner.stop("Deployment error analysis complete");
       note(
-        suggestions.map((suggestion, index) => `${index + 1}. ${suggestion}`).join("\n"),
-        "Gemini fix suggestions",
+        diagnosis.suggestions.map((suggestion, index) => `${index + 1}. ${suggestion}`).join("\n"),
+        diagnosis.source === "Gemini" ? "Gemini fix suggestions" : "Deployment fix suggestions",
       );
     } else {
       diagnosisSpinner.stop("No deployment errors found in logs");
@@ -208,7 +224,7 @@ async function velocity(): Promise<void> {
   }
 
   if (buildResult.readyState !== "READY") {
-    outro(pc.red(`Vercel deployment ended with status ${buildResult.readyState}.`));
+    outro(pc.red(`${provider === "vercel" ? "Vercel" : "Netlify"} deployment ended with status ${buildResult.readyState}.`));
     exit(1);
   }
 

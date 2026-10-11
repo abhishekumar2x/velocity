@@ -15,7 +15,9 @@ The scanner returns one project structure containing the resolved root,
 detected settings, and filtered project file entries. The CLI displays that
 structure and the Vercel adapter uses its file list for uploads.
 
-Netlify is listed in the provider selector but is not implemented yet.
+Netlify deployments use the installed Netlify CLI. Install it with
+`npm install --global netlify-cli`, authenticate once with `netlify login`, and
+link the project to a Netlify site when prompted.
 
 ## Provider recommendations
 
@@ -36,8 +38,9 @@ clarifies that this is a fit adjustment, not additional security evidence.
 Built-in scores start at 6/10 and are reduced for scanner warnings; they are
 limited estimates because source files and provider settings were not reviewed.
 Provider recommendations compare each provider's build and output settings
-with the detected project configuration. Netlify deployment is not implemented
-yet, and is identified as such in the selector.
+with the detected project configuration. Netlify CLI runs a build and creates
+a draft deploy; add a `netlify.toml` when the project needs custom build or
+publish settings.
 
 After Vercel finishes streaming deployment logs, Velocity checks for build or
 deployment errors and can ask Gemini for project-specific fix suggestions.
@@ -45,3 +48,8 @@ Only bounded error context is sent, with common secrets and tokens redacted.
 Set `GEMINI_API_KEY` to enable this analysis. Short Gemini rate limits are
 retried once when the API supplies a retry delay; persistent HTTP 429 responses
 are reported with quota and billing checks to try.
+For Netlify Next.js deploys in Bun projects, Velocity installs the missing
+`@netlify/plugin-nextjs` adapter with `bun add -d` before deployment. This keeps
+Bun as the project package manager and prevents Netlify from trying to
+auto-install the adapter through npm. If Gemini cannot analyze a build error,
+Velocity shows targeted local fix suggestions when available.
